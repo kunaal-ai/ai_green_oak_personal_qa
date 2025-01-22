@@ -22,7 +22,7 @@
     {
         "feature_description": "Password reset functionality",
         "feature_type": "Authentication",
-        "test_type": "Functional",
+        "test_type": "Security",
         "domain": "Security",
         "scenario": "Reset password with valid email",
         "steps": [
@@ -39,25 +39,25 @@
         }
     },
     {
-        "feature_description": "User registration form validation",
-        "feature_type": "Form Validation",
-        "test_type": "Validation",
-        "domain": "User Management",
-        "scenario": "Invalid email format",
+        "feature_description": "Two-factor authentication setup",
+        "feature_type": "Authentication",
+        "test_type": "Integration",
+        "domain": "Security",
+        "scenario": "Enable 2FA with authenticator app",
         "steps": [
-            "Enter username",
-            "Enter invalid email format",
-            "Enter password",
-            "Click register button"
+            "Navigate to security settings",
+            "Click enable 2FA",
+            "Scan QR code with authenticator app",
+            "Enter verification code",
+            "Click confirm"
         ],
         "expected_results": [
-            "Form submission should be prevented",
-            "Error message should indicate invalid email format"
+            "2FA should be enabled",
+            "Backup codes should be generated",
+            "User should see success message"
         ],
         "test_data": {
-            "username": "newuser",
-            "email": "invalid.email",
-            "password": "Password123!"
+            "verification_code": "123456"
         }
     },
     {
@@ -81,6 +81,30 @@
             "card_number": "4111111111111111",
             "expiry": "12/25",
             "cvv": "123"
+        }
+    },
+    {
+        "feature_description": "Refund processing",
+        "feature_type": "Payment",
+        "test_type": "Integration",
+        "domain": "Financial",
+        "scenario": "Process refund for completed order",
+        "steps": [
+            "Locate order in system",
+            "Click refund button",
+            "Enter refund amount",
+            "Select refund reason",
+            "Confirm refund"
+        ],
+        "expected_results": [
+            "Refund should be processed",
+            "Customer should receive email notification",
+            "Order status should update to refunded"
+        ],
+        "test_data": {
+            "order_id": "ORD123",
+            "refund_amount": "50.00",
+            "reason": "Customer request"
         }
     },
     {

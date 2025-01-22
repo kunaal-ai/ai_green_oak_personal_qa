@@ -7,8 +7,12 @@ import logging
 from tqdm import tqdm
 import numpy as np
 from sklearn.metrics import precision_recall_fscore_support
-from .model import TestCaseGenerator
-from .dataset import TestCaseDataset
+try:
+    from .model import TestCaseGenerator
+    from .dataset import TestCaseDataset
+except ImportError:
+    from model import TestCaseGenerator
+    from dataset import TestCaseDataset
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
@@ -28,14 +32,15 @@ class TestCaseTrainer:
         
         self.model = model
         self.device = model.device
-        self.train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        self.val_dataloader = DataLoader(val_dataset, batch_size=batch_size)
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.batch_size = batch_size
         
         self.optimizer = AdamW(model.parameters(), lr=learning_rate)
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
             num_warmup_steps=warmup_steps,
-            num_training_steps=len(self.train_dataloader) * num_epochs
+            num_training_steps=len(DataLoader(train_dataset, batch_size=batch_size, shuffle=True)) * num_epochs
         )
         
         self.num_epochs = num_epochs
@@ -61,48 +66,18 @@ class TestCaseTrainer:
         
         for epoch in range(self.num_epochs):
             print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
-            epoch_loss = 0
-            self.model.train()
-            
-            # Training loop
-            progress_bar = tqdm(self.train_dataloader, desc="Training")
-            for step, batch in enumerate(progress_bar):
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-                
-                # Training step
-                outputs = self.model.train_step(batch)
-                loss = outputs["loss"]
-                epoch_loss += loss
-                
-                # Backward pass
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-                self.scheduler.step()
-                
-                # Logging
-                if global_step % self.logging_steps == 0:
-                    self.log_metrics(global_step, loss, outputs)
-                
-                # Save model
-                if global_step % self.save_steps == 0:
-                    self.save_checkpoint(global_step)
-                
-                global_step += 1
-                progress_bar.set_postfix({'loss': loss})
-            
-            # Validation
-            val_loss, metrics = self.evaluate()
-            self.train_losses.append(epoch_loss / len(self.train_dataloader))
-            self.val_losses.append(val_loss)
+            metrics = self.train_epoch()
+            self.train_losses.append(metrics['loss'])
+            self.val_losses.append(metrics['val_loss'])
             
             # Update metrics history
-            for metric, value in metrics.items():
-                self.metrics_history[metric].append(value)
+            self.metrics_history['precision'].append(0)
+            self.metrics_history['recall'].append(0)
+            self.metrics_history['f1'].append(0)
             
             # Save best model
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if metrics['val_loss'] < best_val_loss:
+                best_val_loss = metrics['val_loss']
                 self.save_checkpoint('best')
             
             # Generate and save visualizations
@@ -111,40 +86,94 @@ class TestCaseTrainer:
             # Log epoch metrics
             wandb.log({
                 'epoch': epoch,
-                'train_loss': epoch_loss / len(self.train_dataloader),
-                'val_loss': val_loss,
-                **metrics
+                'train_loss': metrics['loss'],
+                'val_loss': metrics['val_loss'],
+                'val_precision': 0,
+                'val_recall': 0,
+                'val_f1': 0
             })
 
-    def evaluate(self):
-        """Evaluate the model"""
-        self.model.eval()
-        val_loss = 0
-        all_preds = []
-        all_labels = []
+    def train_epoch(self) -> Dict[str, float]:
+        """Train for one epoch"""
+        self.model.train()
+        total_loss = 0
+        num_batches = 0
         
-        with torch.no_grad():
-            for batch in tqdm(self.val_dataloader, desc="Evaluating"):
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-                outputs = self.model.train_step(batch)
-                val_loss += outputs["loss"]
-                
-                # Convert logits to predictions
-                preds = torch.argmax(outputs["logits"], dim=-1)
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(batch["labels"].cpu().numpy())
-        
-        # Calculate metrics
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            all_labels,
-            all_preds,
-            average='weighted'
+        # Create DataLoader
+        train_dataloader = DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True
         )
         
-        return val_loss / len(self.val_dataloader), {
-            'precision': precision,
-            'recall': recall,
-            'f1': f1
+        # Training loop
+        progress_bar = tqdm(train_dataloader, desc="Training")
+        for batch in progress_bar:
+            # Move batch to device
+            input_ids = batch['input_ids'].to(self.model.device)
+            attention_mask = batch['attention_mask'].to(self.model.device)
+            labels = batch['labels'].to(self.model.device)
+            
+            # Forward pass
+            outputs = self.model.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
+            )
+            
+            loss = outputs.loss
+            total_loss += loss.item()
+            
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            self.scheduler.step()
+            
+            # Update progress bar
+            num_batches += 1
+            progress_bar.set_postfix({'loss': loss.item()})
+        
+        # Evaluate on validation set
+        val_metrics = self.evaluate()
+        
+        metrics = {
+            'loss': total_loss / num_batches,
+            'val_loss': val_metrics['loss']
+        }
+        
+        return metrics
+
+    def evaluate(self) -> Dict[str, float]:
+        """Evaluate the model on validation set"""
+        self.model.eval()
+        total_loss = 0
+        num_batches = 0
+        
+        val_dataloader = DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False
+        )
+        
+        with torch.no_grad():
+            for batch in val_dataloader:
+                input_ids = batch['input_ids'].to(self.model.device)
+                attention_mask = batch['attention_mask'].to(self.model.device)
+                labels = batch['labels'].to(self.model.device)
+                
+                outputs = self.model.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels
+                )
+                
+                loss = outputs.loss
+                total_loss += loss.item()
+                num_batches += 1
+        
+        return {
+            'loss': total_loss / num_batches
         }
 
     def generate_visualizations(self, epoch: int):
@@ -176,7 +205,7 @@ class TestCaseTrainer:
         
         # Learning rate schedule
         plt.figure(figsize=(10, 6))
-        lrs = [self.scheduler.get_lr()[0] for _ in range(len(self.train_dataloader))]
+        lrs = [self.scheduler.get_lr()[0] for _ in range(len(DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)))]
         plt.plot(lrs)
         plt.title('Learning Rate Schedule')
         plt.xlabel('Step')
